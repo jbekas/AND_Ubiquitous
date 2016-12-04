@@ -24,6 +24,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
 import android.support.annotation.IntDef;
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
+import android.support.annotation.StringRes;
 import android.support.v4.app.NotificationCompat;
 import android.support.v4.app.TaskStackBuilder;
 import android.text.format.Time;
@@ -36,12 +39,20 @@ import com.example.android.sunshine.app.R;
 import com.example.android.sunshine.app.Utility;
 import com.example.android.sunshine.app.data.WeatherContract;
 import com.example.android.sunshine.app.muzei.WeatherMuzeiSource;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.ResultCallback;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.PutDataMapRequest;
+import com.google.android.gms.wearable.Wearable;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -87,8 +98,34 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
     public static final int LOCATION_STATUS_UNKNOWN = 3;
     public static final int LOCATION_STATUS_INVALID = 4;
 
+    GoogleApiClient googleApiClient;
+
     public SunshineSyncAdapter(Context context, boolean autoInitialize) {
         super(context, autoInitialize);
+
+        //Moving construction of api client here, based on a post in community.
+        googleApiClient = new GoogleApiClient.Builder(context)
+                .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
+                    @Override
+                    public void onConnected(@Nullable Bundle bundle) {
+                        Log.d(LOG_TAG, "onConnected()");
+                    }
+
+                    @Override
+                    public void onConnectionSuspended(int i) {
+                        Log.d(LOG_TAG, "onConnectionSuspended()");
+                    }
+                })
+                .addOnConnectionFailedListener(new GoogleApiClient.OnConnectionFailedListener() {
+                    @Override
+                    public void onConnectionFailed(@NonNull ConnectionResult connectionResult) {
+                        Log.d(LOG_TAG, "onConnectionFailed()");
+                    }
+                })
+                .addApi(Wearable.API)
+                .build();
+
+        googleApiClient.connect();
     }
 
     @Override
@@ -286,8 +323,8 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 double windSpeed;
                 double windDirection;
 
-                double high;
-                double low;
+                int high;
+                int low;
 
                 String description;
                 int weatherId;
@@ -313,8 +350,13 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 // Temperatures are in a child object called "temp".  Try not to name variables
                 // "temp" when working with temperature.  It confuses everybody.
                 JSONObject temperatureObject = dayForecast.getJSONObject(OWM_TEMPERATURE);
-                high = temperatureObject.getDouble(OWM_MAX);
-                low = temperatureObject.getDouble(OWM_MIN);
+                high = temperatureObject.getInt(OWM_MAX);
+                low = temperatureObject.getInt(OWM_MIN);
+
+                // only send today's date to Wear devices
+                if (i == 0) {
+                    updateWatchfaces(high, low, weatherId);
+                }
 
                 ContentValues weatherValues = new ContentValues();
 
@@ -375,6 +417,7 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                     .setClass(context, WeatherMuzeiSource.class));
         }
     }
+
 
     private void notifyWeather() {
         Context context = getContext();
@@ -635,5 +678,63 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
         SharedPreferences.Editor spe = sp.edit();
         spe.putInt(c.getString(R.string.pref_location_status_key), locationStatus);
         spe.commit();
+    }
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////
+    //
+    // Android Wear
+    //
+    ///////////////////////////////////////////////////////////////////////////////////////////////
+
+    private void updateWatchfaces(int high, int low, int weatherId) {
+        //Log.d(LOG_TAG, "updating watch faces");
+
+        Bitmap bm = BitmapFactory.decodeResource(getContext().getResources(), Utility.getArtResourceForWeatherCondition(weatherId));
+
+        @StringRes int resourceString =
+                Utility.isMetric(getContext()) ? R.string.metric_temp : R.string.imperial_temp;
+
+        String highTemp = getContext().getString(resourceString, Utility.formatTemperature(getContext(), high));
+        String lowTemp = getContext().getString(resourceString, Utility.formatTemperature(getContext(), low));
+
+        PutDataMapRequest dataMap = PutDataMapRequest.create("/weather");
+        dataMap.getDataMap().putAsset("icon", toAsset(bm));
+        dataMap.getDataMap().putString("high", highTemp);
+        dataMap.getDataMap().putString("low", lowTemp);
+
+        Wearable.DataApi.putDataItem(googleApiClient, dataMap.asPutDataRequest())
+                .setResultCallback(new ResultCallback<DataApi.DataItemResult>() {
+                    @Override
+                    public void onResult(DataApi.DataItemResult dataItemResult) {
+                        if (dataItemResult.getStatus().isSuccess()) {
+                            //Log.d(LOG_TAG, "send was successful.");
+                        } else {
+                            //Log.d(LOG_TAG, "send failed!");
+                        }
+                    }
+                });
+    }
+
+    /**
+     * Builds an {@link com.google.android.gms.wearable.Asset} from a bitmap. The image that we get
+     * back from the camera in "data" is a thumbnail size. Typically, your image should not exceed
+     * 320x320 and if you want to have zoom and parallax effect in your app, limit the size of your
+     * image to 640x400. Resize your image before transferring to your wearable device.
+     */
+    private static Asset toAsset(Bitmap bitmap) {
+        ByteArrayOutputStream byteStream = null;
+        try {
+            byteStream = new ByteArrayOutputStream();
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, byteStream);
+            return Asset.createFromBytes(byteStream.toByteArray());
+        } finally {
+            if (null != byteStream) {
+                try {
+                    byteStream.close();
+                } catch (IOException e) {
+                    // ignore
+                }
+            }
+        }
     }
 }

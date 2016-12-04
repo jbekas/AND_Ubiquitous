@@ -148,6 +148,8 @@ public class MainActivity extends AppCompatActivity implements ForecastFragment.
             }
             mLocation = location;
         }
+
+        SunshineSyncAdapter.syncImmediately(this);
     }
 
     @Override
